@@ -94,6 +94,9 @@ export class DeviceSession {
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   private advertAbort: AbortController | null = null
   private retryMs = 2000
+  // Browsers may hand back the same characteristic object after a reconnect; track our listener
+  // per characteristic so re-subscribing replaces it instead of stacking a second one.
+  private readonly listeners = new Map<BluetoothRemoteGATTCharacteristic, () => void>()
   private readonly onDisconnect = () => this.handleDisconnect()
   private readonly onVisibility = () => {
     // Chrome aborts watchAdvertisements when the tab is hidden; re-arm when it's back.
@@ -137,6 +140,8 @@ export class DeviceSession {
     this.assembler.flush()
     this.device.removeEventListener('gattserverdisconnected', this.onDisconnect)
     document.removeEventListener('visibilitychange', this.onVisibility)
+    for (const [ch, fn] of this.listeners) ch.removeEventListener('characteristicvaluechanged', fn)
+    this.listeners.clear()
     if (this.device.gatt?.connected) this.device.gatt.disconnect()
     this.handlers.onState('disconnected')
   }
@@ -183,7 +188,7 @@ export class DeviceSession {
       if (spec.required) throw e
       return
     }
-    ch.addEventListener('characteristicvaluechanged', () => {
+    const onValue = () => {
       const data = ch.value
       if (!data) return
       try {
@@ -191,7 +196,11 @@ export class DeviceSession {
       } catch (e) {
         console.warn('unparseable notification', spec.uuid, e)
       }
-    })
+    }
+    const previous = this.listeners.get(ch)
+    if (previous) ch.removeEventListener('characteristicvaluechanged', previous)
+    ch.addEventListener('characteristicvaluechanged', onValue)
+    this.listeners.set(ch, onValue)
     try {
       await ch.startNotifications()
     } catch (e) {
