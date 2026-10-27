@@ -19,7 +19,9 @@ class FakeChar extends EventTarget {
     this.log = log
     this.properties = props
   }
+  failNotify = false
   async startNotifications() {
+    if (this.failNotify) throw new DOMException('GATT error', 'NetworkError')
     this.notifying = true
     this.log.push(`notify:${this.uuid.slice(4, 8)}`)
     return this
@@ -60,6 +62,8 @@ class FakeDevice extends EventTarget {
   connected = false
   connectCalls = 0
   failConnects = 0
+  /** ms a connect() takes to complete; 0 = immediate */
+  connectDelay = 0
   readonly services: FakeService[]
   readonly gatt: { readonly connected: boolean; connect: () => Promise<unknown>; disconnect: () => void }
   constructor(services: FakeService[]) {
@@ -69,6 +73,7 @@ class FakeDevice extends EventTarget {
       connected: false,
       connect: async () => {
         this.connectCalls++
+        if (this.connectDelay) await new Promise((r) => setTimeout(r, this.connectDelay))
         if (this.failConnects > 0) {
           this.failConnects--
           throw new DOMException('unreachable', 'NetworkError')
@@ -90,11 +95,11 @@ class FakeDevice extends EventTarget {
 const le16 = (v: number) => [v & 0xff, (v >> 8) & 0xff]
 const bpPacket = (sys: number) => [0x02, ...le16(sys), ...le16(80), ...le16(93), ...le16(2026), 10, 27, 8, 0, sys % 60]
 
-function setup(extra: FakeService[] = []) {
+function setup(extra: FakeService[] = [], { health = true } = {}) {
   const log: string[] = []
   const bpm = new FakeChar(CHAR.bloodPressureMeasurement, log)
   const cts = new FakeChar(CHAR.currentTime, log)
-  const dev = new FakeDevice([new FakeService(SERVICE.bloodPressure, [bpm]), new FakeService(SERVICE.currentTime, [cts]), ...extra])
+  const dev = new FakeDevice([...(health ? [new FakeService(SERVICE.bloodPressure, [bpm])] : []), new FakeService(SERVICE.currentTime, [cts]), ...extra])
   const final: NewReading[] = []
   const states: string[] = []
   const session = new DeviceSession(dev as unknown as BluetoothDevice, {
@@ -166,6 +171,99 @@ describe('DeviceSession', () => {
     expect(log).toEqual(['notify:2a18', 'notify:2a52', 'write:2a52'])
     expect(Array.from(racp.writes[0])).toEqual([0x01, 0x01])
     expect(mainLog).toContain('write:2a2b')
+    session.stop()
+  })
+
+  it('turning auto-reconnect off while connected stops reconnecting after the next drop', async () => {
+    vi.useFakeTimers()
+    const { dev, session, states } = setup()
+    await session.start(true)
+    session.setListening(false)
+    dev.drop()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(dev.connectCalls).toBe(1)
+    expect(states.at(-1)).toBe('disconnected')
+    session.stop()
+  })
+
+  it('a session restarted after stop() still handles disconnects', async () => {
+    vi.useFakeTimers()
+    const { dev, session } = setup()
+    await session.start(true)
+    session.stop()
+    await session.start(true)
+    dev.drop()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(dev.connected).toBe(true)
+    expect(dev.connectCalls).toBe(3)
+    session.stop()
+  })
+
+  it('stop() during an in-flight connect leaves no link and no subscriptions', async () => {
+    vi.useFakeTimers()
+    const { dev, bpm, session, final } = setup()
+    dev.connectDelay = 5000
+    const started = session.start(true)
+    await vi.advanceTimersByTimeAsync(1000)
+    session.stop()
+    await vi.advanceTimersByTimeAsync(10_000)
+    await started
+    expect(dev.connected).toBe(false)
+    bpm.emit(bpPacket(140))
+    expect(final).toHaveLength(0)
+  })
+
+  it('a failed subscription drops the link and retries instead of idling while connected', async () => {
+    vi.useFakeTimers()
+    const { dev, bpm, session, states } = setup()
+    bpm.failNotify = true
+    await session.start(true)
+    expect(dev.connected).toBe(false)
+    expect(states.at(-1)).toBe('waiting')
+    bpm.failNotify = false
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(bpm.notifying).toBe(true)
+    expect(states.at(-1)).toBe('connected')
+    session.stop()
+  })
+
+  it('a device without health services is a visible error, not an endless retry', async () => {
+    vi.useFakeTimers()
+    const { dev, session, states } = setup([], { health: false })
+    await session.start(true)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(dev.connectCalls).toBe(1)
+    expect(states.at(-1)).toBe('error')
+    session.stop()
+  })
+
+  it('writes Date Time (0x2A08) for cuffs that expose it instead of Current Time', async () => {
+    const log: string[] = []
+    const bpm = new FakeChar(CHAR.bloodPressureMeasurement, log)
+    const dt = new FakeChar(CHAR.dateTime, log)
+    const dev = new FakeDevice([new FakeService(SERVICE.bloodPressure, [bpm, dt])])
+    const session = new DeviceSession(dev as unknown as BluetoothDevice, { onState: () => {}, onInfo: () => {}, onLive: () => {}, onFinal: () => {} })
+    await session.start(false)
+    expect(dt.writes[0]).toHaveLength(7)
+    expect(log.indexOf('write:2a08')).toBeLessThan(log.indexOf('notify:2a35'))
+    session.stop()
+  })
+
+  it('a dropped link during service discovery is retried, not reported as an unsupported device', async () => {
+    vi.useFakeTimers()
+    const { dev, session, states } = setup()
+    const real = dev.gatt.connect
+    let first = true
+    dev.gatt.connect = async () => {
+      const server = (await real()) as { getPrimaryServices: () => Promise<unknown> }
+      if (!first) return server
+      first = false
+      return { ...server, getPrimaryServices: async () => Promise.reject(new DOMException('GATT Server is disconnected', 'NetworkError')) }
+    }
+    await session.start(true)
+    expect(states).not.toContain('error')
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(states.at(-1)).toBe('connected')
     session.stop()
   })
 })

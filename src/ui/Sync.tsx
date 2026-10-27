@@ -3,11 +3,11 @@ import { useEffect, useState, type ChangeEvent } from 'react'
 import { db, unsynced } from '../db'
 import { download, toCsv, toJson } from '../export'
 import { importFile } from '../import'
-import { googleHealthEligible, loadGis, sheetUrl } from '../sinks/google'
+import { gisReady, googleHealthEligible, loadGis, sheetUrl } from '../sinks/google'
 import { pushGoogleHealth, pushGoogleSheet, saveGoogleClientId, useGoogle, type GoogleState } from '../state/google'
 import { toast } from '../state/toast'
 import { disconnectWithings, saveWithingsConfig, startWithingsLogin, syncWithings, useWithings, type WithingsState } from '../state/withings'
-import { redirectUri } from '../sources/withings'
+import { HOSTED_WITHINGS, redirectUri } from '../sources/withings'
 import { AppleHealth } from './AppleHealth'
 import { DownloadIcon, UploadIcon } from './icons'
 
@@ -30,15 +30,13 @@ function Withings() {
 }
 
 function WithingsCard({ w }: { w: WithingsState }) {
-  const [clientId, setClientId] = useState(w.config?.clientId ?? '')
+  const [clientId, setClientId] = useState(w.config?.brokerUrl ? '' : (w.config?.clientId ?? ''))
   const [secret, setSecret] = useState(w.config?.clientSecret ?? '')
-  const [broker, setBroker] = useState(w.config?.brokerUrl ?? '')
-  const [useBroker, setUseBroker] = useState(!!w.config?.brokerUrl)
   const [busy, setBusy] = useState(false)
 
   const connected = !!w.tokens
-  const config = { clientId: clientId.trim(), clientSecret: useBroker ? undefined : secret.trim(), brokerUrl: useBroker ? broker.trim() : undefined }
-  const ready = config.clientId && (useBroker ? config.brokerUrl : config.clientSecret)
+  const own = { clientId: clientId.trim(), clientSecret: secret.trim() }
+  const ownReady = !!(own.clientId && own.clientSecret)
 
   const sync = async (full: boolean) => {
     setBusy(true)
@@ -72,8 +70,16 @@ function WithingsCard({ w }: { w: WithingsState }) {
         </>
       ) : (
         <>
-          <details>
-            <summary>Set up (one time, about 5 minutes)</summary>
+          {HOSTED_WITHINGS && (
+            <div className="row wrap">
+              <button className="primary" onClick={() => void startWithingsLogin(HOSTED_WITHINGS!)}>
+                Connect Withings
+              </button>
+              <button onClick={() => void startWithingsLogin(HOSTED_WITHINGS!, true)}>Try the Withings demo account</button>
+            </div>
+          )}
+          <details open={!HOSTED_WITHINGS}>
+            <summary>{HOSTED_WITHINGS ? 'Or use your own Withings developer app' : 'Set up (one time, about 5 minutes)'}</summary>
             <ol className="prose">
               <li>
                 Sign in at <a href="https://developer.withings.com/dashboard/" target="_blank" rel="noreferrer">developer.withings.com</a> and
@@ -84,43 +90,33 @@ function WithingsCard({ w }: { w: WithingsState }) {
               </li>
               <li>Copy the Client ID and Secret into the fields below.</li>
             </ol>
-            <p className="fine">
-              Your secret stays in this browser and is only sent to Withings. Withings accounts created after 12 Oct 2026
-              need a Withings+ membership before Withings will share data with apps like this one.
-            </p>
-          </details>
-          <div className="fields">
-            <label>
-              <span>Client ID</span>
-              <input value={clientId} onChange={(e) => setClientId(e.target.value)} autoComplete="off" spellCheck={false} />
-            </label>
-            {useBroker ? (
+            <p className="fine">Your secret stays in this browser and is only sent to Withings.</p>
+            <div className="fields">
               <label>
-                <span>Token broker URL</span>
-                <input value={broker} onChange={(e) => setBroker(e.target.value)} placeholder="https://…workers.dev" spellCheck={false} />
+                <span>Client ID</span>
+                <input value={clientId} onChange={(e) => setClientId(e.target.value)} autoComplete="off" spellCheck={false} />
               </label>
-            ) : (
               <label>
                 <span>Client secret</span>
                 <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} autoComplete="off" />
               </label>
-            )}
-          </div>
-          <label className="toggle small">
-            <input type="checkbox" checked={useBroker} onChange={(e) => setUseBroker(e.target.checked)} />
-            Use a token broker instead of a secret (advanced, see README)
-          </label>
-          <div className="row wrap">
-            <button className="primary" disabled={!ready} onClick={() => void startWithingsLogin(config)}>
-              Connect Withings
-            </button>
-            <button disabled={!ready} onClick={() => void startWithingsLogin(config, true)}>
-              Try with Withings demo account
-            </button>
-            <button className="ghost" disabled={!config.clientId} onClick={() => void saveWithingsConfig(config).then(() => toast('Saved'))}>
-              Save
-            </button>
-          </div>
+            </div>
+            <div className="row wrap">
+              <button className={HOSTED_WITHINGS ? '' : 'primary'} disabled={!ownReady} onClick={() => void startWithingsLogin(own)}>
+                Connect with my app
+              </button>
+              <button disabled={!ownReady} onClick={() => void startWithingsLogin(own, true)}>
+                Try the Withings demo account
+              </button>
+              <button className="ghost" disabled={!own.clientId} onClick={() => void saveWithingsConfig(own).then(() => toast('Saved'))}>
+                Save
+              </button>
+            </div>
+          </details>
+          <p className="fine">
+            Withings accounts created after 12 Oct 2026 need a Withings+ membership before Withings will share data with
+            apps like this one. No API access? Import the Withings data export under Files below.
+          </p>
         </>
       )}
     </section>
@@ -135,15 +131,24 @@ function Google() {
 
 function GoogleCard({ g }: { g: GoogleState }) {
   const [clientId, setClientId] = useState(g.clientId ?? '')
+  const [ready, setReady] = useState(gisReady)
   const counts = useLiveQuery(async () => ({
     health: (await unsynced('googleHealth')).filter(googleHealthEligible).length,
     sheets: (await unsynced('googleSheets')).length,
   }))
 
   useEffect(() => {
-    // warm up so the consent popup opens inside the click's user activation
-    if (g.clientId) void loadGis().catch(() => {})
-  }, [g.clientId])
+    // Load sign-in ahead of the click: the consent popup must open inside the click itself.
+    if (!g.clientId || ready) return
+    let live = true
+    loadGis().then(
+      () => live && setReady(true),
+      () => live && toast('Could not load Google sign-in. Check your connection and reopen this tab.', 'error'),
+    )
+    return () => {
+      live = false
+    }
+  }, [g.clientId, ready])
 
   return (
     <section className="card">
@@ -186,10 +191,10 @@ function GoogleCard({ g }: { g: GoogleState }) {
             Save client ID
           </button>
         )}
-        <button className="primary" disabled={!g.clientId} onClick={() => void pushGoogleHealth()}>
+        <button className="primary" disabled={!g.clientId || !ready} onClick={() => void pushGoogleHealth(g.clientId!)}>
           <UploadIcon /> Send to Google Health ({counts?.health ?? 0})
         </button>
-        <button disabled={!g.clientId} onClick={() => void pushGoogleSheet()}>
+        <button disabled={!g.clientId || !ready} onClick={() => void pushGoogleSheet(g.clientId!)}>
           <UploadIcon /> Add to Google Sheet ({counts?.sheets ?? 0})
         </button>
       </div>

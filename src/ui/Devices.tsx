@@ -211,23 +211,26 @@ function Compatibility() {
       </summary>
       <div className="prose">
         <p>
-          <strong>Works directly over Bluetooth</strong> — devices that implement the Bluetooth SIG health profiles,
-          for example many A&amp;D Medical (UA-651BLE, UC-352BLE), Omron (BLE models; pair in the OS first),
-          Beurer, Sanitas, Medisana, Nonin, Polar/Garmin/Wahoo HR straps, and most ANT+/BLE fitness sensors.
-          Profiles: {PROFILES.map((p) => p.label.toLowerCase()).join(', ')}.
+          <strong>Works directly over Bluetooth:</strong> devices that implement the Bluetooth SIG health profiles
+          ({PROFILES.map((p) => p.label.toLowerCase()).join(', ')}). Known good: A&amp;D UA-651BLE and UC-352BLE, Beurer
+          BM/BC cuffs, Medisana connect, Sanitas and Silvercrest cuffs, Samsung Smart Scale, Accu-Chek Instant, Contour
+          Next One, and heart-rate straps. Omron cuffs usually share only their latest reading.
         </p>
         <p>
           <strong>Withings</strong> scales and cuffs use a proprietary, encrypted Bluetooth protocol that only the
-          Withings app can speak. Keep using the Withings app to take readings, then import them here from the Sync
-          tab (Withings cloud API).
+          Withings app can speak. Keep using the Withings app to take readings, then import them from the Sync tab.
         </p>
         <p>
           <strong>Xiaomi, Renpho, Eufy, and most budget smart scales</strong> use proprietary protocols and are not
-          supported yet.
+          supported.
         </p>
         <p>
-          <strong>Browsers:</strong> Chrome, Edge and Opera on desktop and Android. Not Firefox. Not Safari on iOS
-          (use the Bluefy browser there).
+          <strong>Browsers:</strong> Chrome and Edge on Windows, macOS, ChromeOS and Android. On Linux, enable{' '}
+          <code>chrome://flags/#enable-web-bluetooth</code>. Not Firefox, not iOS Safari (use the Bluefy browser there).
+        </p>
+        <p>
+          <strong>Windows and Linux:</strong> pair a cuff or scale once in the system Bluetooth settings first. Chrome
+          can't complete its pairing on these systems.
         </p>
       </div>
     </details>

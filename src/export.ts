@@ -29,21 +29,26 @@ function csvCell(v: string) {
   return /[",\n\r]/.test(v) ? `"${v.replaceAll('"', '""')}"` : v
 }
 
-export const CSV_HEADER = ['timestamp', 'kind', 'source', 'device', 'device_user', ...CSV_COLUMNS.map((c) => c.header), 'notes']
+// dedupe_key goes last so the columns people read come first; it lets a re-import or a restore
+// recognise readings it already has instead of duplicating them.
+export const CSV_HEADER = ['timestamp', 'kind', 'source', 'device', 'device_user', ...CSV_COLUMNS.map((c) => c.header), 'notes', 'dedupe_key']
 
-export function toCsvRow(r: Reading): string[] {
+/** Values at storage precision (rounding is for display only), so exports round-trip exactly. */
+export function toSheetRow(r: Reading): (string | number)[] {
   return [
     new Date(r.takenAt).toISOString(),
     r.kind,
     r.source,
     r.device ?? '',
-    r.deviceUser?.toString() ?? '',
-    ...CSV_COLUMNS.map((c) => {
-      const v = r.values[c.metric]
-      return v === undefined ? '' : String(Number(v.toFixed(Math.max(METRICS[c.metric].digits, 1))))
-    }),
+    r.deviceUser ?? '',
+    ...CSV_COLUMNS.map((c) => r.values[c.metric] ?? ''),
     (r.notes ?? []).join('; '),
+    r.dedupeKey,
   ]
+}
+
+export function toCsvRow(r: Reading): string[] {
+  return toSheetRow(r).map(String)
 }
 
 export function toCsv(readings: Reading[]): string {
@@ -57,8 +62,9 @@ export function toJson(readings: Reading[]): string {
       version: 1,
       exportedAt: new Date().toISOString(),
       units: Object.fromEntries(Object.entries(METRICS).map(([k, m]) => [k, m.unit])),
-      readings: readings.map(({ id, kind, takenAt, deviceTime, values, source, device, deviceUser, notes }) => ({
+      readings: readings.map(({ id, kind, takenAt, deviceTime, values, source, device, deviceUser, notes, dedupeKey }) => ({
         id,
+        dedupeKey,
         kind,
         takenAt: new Date(takenAt).toISOString(),
         deviceTime,

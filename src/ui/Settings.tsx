@@ -1,6 +1,6 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useEffect, useState } from 'react'
-import { db } from '../db'
+import { db, deleteReadings } from '../db'
 import { useUnits } from '../state/settings'
 import { toast } from '../state/toast'
 import type { UnitPrefs } from '../units'
@@ -32,10 +32,7 @@ export function Settings() {
 
   const purgeDemo = async () => {
     const ids = await db.readings.where('source').equals('demo').primaryKeys()
-    await db.transaction('rw', db.readings, db.syncs, async () => {
-      await db.readings.bulkDelete(ids)
-      await db.syncs.where('readingId').anyOf(ids).delete()
-    })
+    await deleteReadings(ids, db, false) // demo data is regenerated, nothing to remember
     toast(`Deleted ${ids.length} demo readings`)
   }
 

@@ -66,6 +66,21 @@ export function metricsFor(kind: ReadingKind): Metric[] {
   return KIND_METRICS[kind]
 }
 
+// What a reading must carry to mean anything: a cuff record with NaN systolic (some devices end a
+// stored-record burst with one) or an oximeter sample with no SpO2 is noise, not a measurement.
+const REQUIRED: Partial<Record<ReadingKind, Metric[]>> = {
+  bloodPressure: ['systolic', 'diastolic'],
+  heartRate: ['heartRate'],
+  spo2: ['spo2'],
+  temperature: ['temperature'],
+  glucose: ['glucose'],
+}
+
+export function isComplete(kind: ReadingKind, values: Values): boolean {
+  const required = REQUIRED[kind]
+  return required ? required.every((m) => values[m] !== undefined) : Object.keys(values).length > 0
+}
+
 /** Drop NaN/Infinity (IEEE-11073 special values) and anything not belonging to the kind. */
 export function cleanValues(kind: ReadingKind, values: Values): Values {
   const allowed = new Set(KIND_METRICS[kind])

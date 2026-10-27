@@ -7,7 +7,7 @@
 // no client secret, no refresh token. The user supplies their own OAuth client ID (see README).
 
 import type { Reading } from '../model'
-import { toCsvRow, CSV_HEADER } from '../export'
+import { CSV_HEADER, toSheetRow } from '../export'
 
 export const HEALTH_SCOPE = 'https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.writeonly'
 export const SHEETS_SCOPE = 'https://www.googleapis.com/auth/drive.file'
@@ -69,9 +69,15 @@ export interface GoogleToken {
   scopes: Set<string>
 }
 
-/** Must be called from a click handler: GIS opens a popup. */
-export async function requestGoogleToken(clientId: string, scopes: string[]): Promise<GoogleToken> {
-  await loadGis()
+export const gisReady = () => !!window.google?.accounts?.oauth2
+
+/**
+ * Must be called synchronously from a click handler, with GIS already loaded (see loadGis):
+ * GIS opens a popup, and browsers only allow that inside the click's user activation, which an
+ * await on a script download or a database read can outlive.
+ */
+export function requestGoogleToken(clientId: string, scopes: string[]): Promise<GoogleToken> {
+  if (!gisReady()) return Promise.reject(new Error('Google sign-in is still loading. Try again in a moment.'))
   return new Promise((resolve, reject) => {
     const client = window.google!.accounts.oauth2.initTokenClient({
       client_id: clientId,
@@ -154,22 +160,53 @@ export interface PushResult {
   failed: { id: string; error: string }[]
 }
 
-export async function pushToGoogleHealth(token: GoogleToken, readings: Reading[], fetchFn: Fetch = fetch): Promise<PushResult> {
+export interface PushProgress {
+  /** data points already accepted for a reading in an earlier, interrupted push */
+  sentPoints?: (readingId: string) => Set<string>
+  onPoint?: (readingId: string, type: string) => void | Promise<void>
+  onReading?: (readingId: string) => void | Promise<void>
+}
+
+/**
+ * Push readings one data point at a time, reporting progress as it goes: Google has no
+ * idempotency key for weight or body fat, so anything accepted must never be sent again, even
+ * if a later point or the token fails.
+ */
+export async function pushToGoogleHealth(token: GoogleToken, readings: Reading[], fetchFn: Fetch = fetch, progress: PushProgress = {}): Promise<PushResult> {
   const result: PushResult = { done: [], failed: [] }
   for (const r of readings) {
     try {
+      const sent = progress.sentPoints?.(r.id) ?? new Set<string>()
       for (const p of healthDataPoints(r)) {
+        if (sent.has(p.type)) continue
         await call(fetchFn, token, `${HEALTH_API}/${p.type}/dataPoints`, { method: 'POST', body: JSON.stringify(p.body) })
+        await progress.onPoint?.(r.id, p.type)
       }
       result.done.push(r.id)
+      await progress.onReading?.(r.id)
     } catch (e) {
       // An expired token or a project misconfiguration fails every request; stop instead of
-      // hammering the API with the rest of the queue.
+      // hammering the API with the rest of the queue. Progress so far is already reported.
       if (e instanceof GoogleApiError && (e.status === 401 || e.status === 403)) throw e
       result.failed.push({ id: r.id, error: e instanceof Error ? e.message : String(e) })
     }
   }
   return result
+}
+
+/**
+ * The account must have a Google Health profile (the Google Health / Fitbit app set up) before it
+ * can take writes; otherwise this fails with FAILED_PRECONDITION / ACCOUNT_NOT_LINKED.
+ */
+export async function checkHealthAccount(token: GoogleToken, fetchFn: Fetch = fetch): Promise<void> {
+  try {
+    await call(fetchFn, token, 'https://health.googleapis.com/v4/users/me/identity')
+  } catch (e) {
+    if (e instanceof GoogleApiError && e.status === 400) {
+      throw new GoogleApiError(400, 'This Google account has no Google Health profile yet. Set up the Google Health (Fitbit) app with it first.')
+    }
+    throw e
+  }
 }
 
 // --- Sheets --------------------------------------------------------------------------------------
@@ -187,18 +224,27 @@ export async function createSheet(token: GoogleToken, fetchFn: Fetch = fetch): P
   return id
 }
 
-async function appendRows(token: GoogleToken, sheetId: string, rows: string[][], fetchFn: Fetch) {
+async function appendRows(token: GoogleToken, sheetId: string, rows: (string | number)[][], fetchFn: Fetch) {
   const range = encodeURIComponent('readings!A1')
+  // RAW: numbers stay numbers, and text such as a device name is never parsed as a formula.
   await call(fetchFn, token, `${SHEETS_API}/${sheetId}/values/${range}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
     method: 'POST',
     body: JSON.stringify({ values: rows }),
   })
 }
 
-export async function appendToSheet(token: GoogleToken, sheetId: string, readings: Reading[], fetchFn: Fetch = fetch) {
-  // Sheets accepts large batches; 500 rows per call keeps payloads modest.
+/** Appends in 500-row chunks, reporting each so a failure part-way never re-sends earlier rows. */
+export async function appendToSheet(
+  token: GoogleToken,
+  sheetId: string,
+  readings: Reading[],
+  fetchFn: Fetch = fetch,
+  onChunk?: (ids: string[]) => void | Promise<void>,
+) {
   for (let i = 0; i < readings.length; i += 500) {
-    await appendRows(token, sheetId, readings.slice(i, i + 500).map(toCsvRow), fetchFn)
+    const chunk = readings.slice(i, i + 500)
+    await appendRows(token, sheetId, chunk.map(toSheetRow), fetchFn)
+    await onChunk?.(chunk.map((r) => r.id))
   }
 }
 

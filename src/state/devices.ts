@@ -29,21 +29,15 @@ const listeners = new Set<Listener>()
 const sessions = new Map<string, DeviceSession>()
 const demoTimers = new Map<string, ReturnType<typeof setTimeout>[]>()
 
-function emit() {
-  entries = [...entries]
-  listeners.forEach((l) => l())
-}
-
 function patch(key: string, change: Partial<DeviceEntry>) {
   entries = entries.map((e) => (e.key === key ? { ...e, ...change } : e))
   listeners.forEach((l) => l())
 }
 
 function upsert(entry: DeviceEntry) {
-  const i = entries.findIndex((e) => e.key === entry.key)
-  if (i >= 0) entries[i] = { ...entries[i], ...entry }
-  else entries.push(entry)
-  emit()
+  const exists = entries.some((e) => e.key === entry.key)
+  entries = exists ? entries.map((e) => (e.key === entry.key ? { ...e, ...entry } : e)) : [...entries, entry]
+  listeners.forEach((l) => l())
 }
 
 export function useDevices(): DeviceEntry[] {
@@ -81,7 +75,11 @@ function handlersFor(key: string) {
       void db.devices.put({ id: info.id, name: info.name, profile: info.profiles.map((p) => p.id).join(','), lastSeen: Date.now() })
     },
     onLive: (live: NewReading) => patch(key, { live }),
-    onFinal: (readings: NewReading[]) => void saveFinal(key, readings),
+    onFinal: (readings: NewReading[]) => {
+      // show the finished reading: for a scale that's the merged weigh-in, not its last packet
+      if (readings.length) patch(key, { live: readings[readings.length - 1] })
+      void saveFinal(key, readings)
+    },
   }
 }
 
@@ -111,11 +109,12 @@ export async function attach(device: BluetoothDevice) {
 }
 
 export function setListen(key: string, listen: boolean) {
-  const session = sessions.get(key)
   patch(key, { listen })
+  const session = sessions.get(key)
   if (!session) return
-  if (listen) void session.start(true).catch(() => {})
-  else if (!session.connected) session.stop()
+  // After an error the session isn't listening any more; turning it back on starts it again.
+  if (listen && !session.connected && entries.find((e) => e.key === key)?.state === 'error') void session.start(true).catch(() => {})
+  else session.setListening(listen)
 }
 
 export function removeDevice(key: string) {
@@ -124,7 +123,7 @@ export function removeDevice(key: string) {
   demoTimers.get(key)?.forEach(clearTimeout)
   demoTimers.delete(key)
   entries = entries.filter((e) => e.key !== key)
-  emit()
+  listeners.forEach((l) => l())
 }
 
 /** Persist the current live value (for streaming sensors like HR straps). */
@@ -150,6 +149,7 @@ export function runDemo(profileId: ProfileId) {
     listen: false,
     saved: entries.find((e) => e.key === key)?.saved ?? 0,
     live: undefined,
+    detail: undefined,
     info: { id: key, name: sim.label, profiles: [profile], battery: 87, manufacturer: 'healthgear', model: 'simulator' },
   })
   const h = handlersFor(key)

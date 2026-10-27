@@ -90,8 +90,16 @@ export interface Parsed {
 
 type Ctx = { device?: string; now?: number }
 
+const Y2000 = Date.UTC(2000, 0, 1)
+
+/**
+ * Use the device's timestamp unless it's implausible: a cuff whose clock reset after a battery
+ * change reports 2010 or 2000-01-01, which would bury the reading years back in history.
+ */
 function stamp(ts: number | undefined, ctx: Ctx) {
-  return ts === undefined ? { takenAt: ctx.now ?? Date.now(), deviceTime: false } : { takenAt: ts, deviceTime: true }
+  const now = ctx.now ?? Date.now()
+  const plausible = ts !== undefined && ts >= Y2000 && ts <= now + 86_400_000
+  return plausible ? { takenAt: ts, deviceTime: true } : { takenAt: now, deviceTime: false }
 }
 
 const userId = (id: number | undefined) => (id === undefined || id === 0xff ? undefined : id)

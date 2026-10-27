@@ -2,7 +2,7 @@
 // incremental sync. Tokens live in IndexedDB; the client secret too, if the user brought one.
 
 import { useLiveQuery } from 'dexie-react-hooks'
-import { addReadings, db, getSetting, setSetting } from '../db'
+import { db, getSetting, setSetting, upsertReadings } from '../db'
 import {
   authorizeUrl,
   exchangeCode,
@@ -43,17 +43,27 @@ export async function startWithingsLogin(config: WithingsConfig, demo = false) {
   location.assign(authorizeUrl(config, state, demo))
 }
 
-/** Run as early as possible on page load: the authorization code is only valid for ~30 s. */
+/**
+ * Run before the first render: the authorization code is only valid for ~30 s, and the URL is
+ * cleaned up synchronously (before any await) so the app opens on the Sync tab without the code.
+ */
 export async function completeWithingsLogin(): Promise<void> {
   const url = new URL(location.href)
   const code = url.searchParams.get('code')
   const state = url.searchParams.get('state')
-  if (!code || !state) return
-  const s = await load()
-  if (!s.pendingState || s.pendingState !== state || !s.config) return
-  url.searchParams.delete('code')
-  url.searchParams.delete('state')
+  const denied = url.searchParams.get('error')
+  if (!(code && state) && !denied) return
+  for (const p of ['code', 'state', 'error', 'error_description']) url.searchParams.delete(p)
   history.replaceState(null, '', `${url.pathname}${url.search}#sync`)
+  window.dispatchEvent(new HashChangeEvent('hashchange'))
+  const s = await load()
+  if (denied) {
+    if (s.pendingState) await save({ ...s, pendingState: undefined })
+    return toast('Withings login was cancelled', 'error')
+  }
+  if (!code || !s.pendingState || s.pendingState !== state || !s.config) {
+    return toast('Withings login could not be verified (expired or from another tab). Connect again.', 'error')
+  }
   try {
     const tokens = await exchangeCode(s.config, code)
     await save({ ...s, tokens, pendingState: undefined, lastUpdate: undefined })
@@ -84,10 +94,12 @@ export async function syncWithings(full = false): Promise<number> {
   try {
     const { s, tokens } = await freshTokens()
     const { readings, updateTime } = await fetchMeasures(tokens, full ? undefined : s.lastUpdate)
-    const fresh = await addReadings(readings)
+    // Withings returns edited or reassigned measurement groups under the same id: replace ours.
+    const { added, updated } = await upsertReadings(readings)
     await save({ ...(await load()), lastUpdate: updateTime || s.lastUpdate, lastSync: Date.now() })
-    toast(fresh.length ? `Imported ${fresh.length} Withings readings` : 'Withings: nothing new')
-    return fresh.length
+    const parts = [added.length && `${added.length} new`, updated.length && `${updated.length} corrected`].filter(Boolean)
+    toast(parts.length ? `Withings: ${parts.join(', ')}` : 'Withings: nothing new')
+    return added.length + updated.length
   } catch (e) {
     if (e instanceof WithingsError && e.authFailed) {
       const s = await load()

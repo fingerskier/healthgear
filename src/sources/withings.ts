@@ -4,7 +4,8 @@
 //
 // The token endpoint requires client_secret (no PKCE). Two ways to supply it:
 //   - bring your own: the user registers a free Withings developer app and pastes ID + secret
-//   - broker: an optional tiny worker (see worker/withings-broker.js) holds the secret
+//   - hosted: the site was built with a token broker (worker/withings-broker.js) that holds the
+//     secret of one shared app; its origin is pinned in the CSP at build time
 // Withings answers errors as HTTP 200 with a non-zero `status`; never trust response.ok alone.
 
 import type { NewReading, Values } from '../model'
@@ -18,9 +19,15 @@ export interface WithingsConfig {
   clientId: string
   /** absent when a broker is used */
   clientSecret?: string
-  /** base URL of an optional token broker (POST {grant_type, code|refresh_token, redirect_uri}) */
+  /** base URL of a token broker (POST {grant_type, code|refresh_token, redirect_uri}) */
   brokerUrl?: string
 }
+
+/** The hosted app this build was configured with, if any. */
+export const HOSTED_WITHINGS: WithingsConfig | null =
+  import.meta.env.VITE_WITHINGS_BROKER_URL && import.meta.env.VITE_WITHINGS_CLIENT_ID
+    ? { clientId: import.meta.env.VITE_WITHINGS_CLIENT_ID, brokerUrl: import.meta.env.VITE_WITHINGS_BROKER_URL }
+    : null
 
 export interface WithingsTokens {
   accessToken: string
@@ -37,7 +44,12 @@ export class WithingsError extends Error {
   }
   /** the grant is dead: the user has to reconnect */
   get authFailed() {
-    return (this.status >= 100 && this.status <= 102) || this.status === 200 || this.status === 401 || (this.status === 503 && /refresh|code|grant/i.test(this.message))
+    return (
+      (this.status >= 100 && this.status <= 102) ||
+      this.status === 200 ||
+      this.status === 401 ||
+      (this.status === 503 && !/client id|secret/i.test(this.message) && /refresh|code|grant|token/i.test(this.message))
+    )
   }
   get rateLimited() {
     return this.status === 601
@@ -83,7 +95,10 @@ async function tokenRequest(cfg: WithingsConfig, grant: Record<string, string>, 
       body: JSON.stringify({ ...grant, redirect_uri: redirectUri() }),
     })
     const json = await res.json().catch(() => ({}))
-    if (!res.ok) throw new WithingsError(res.status === 401 ? 401 : 503, json.error ?? `broker HTTP ${res.status}`)
+    // The broker answers 401 only for a dead grant; anything else carries Withings' own status
+    // (601 rate limit, 522 timeout…) or is the broker's problem, and must not drop the tokens.
+    if (res.status === 401) throw new WithingsError(401, json.error ?? 'grant rejected')
+    if (!res.ok) throw new WithingsError(typeof json.status === 'number' ? json.status : 0, json.error ?? `broker HTTP ${res.status}`)
     return toTokens(json, now)
   }
   if (!cfg.clientSecret) throw new WithingsError(503, 'Missing client secret')

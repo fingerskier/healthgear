@@ -10,24 +10,31 @@ permissions:
   contents: read
 
 concurrency:
-  group: pages-${{ github.ref }}
-  cancel-in-progress: true
+  group: pages-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 22
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
           cache: npm
       - run: npm ci
       - run: npm run lint
       - run: npm test
       - run: npm run build
+        env:
+          # optional hosted Withings login: a deployed worker/withings-broker.js and the client ID
+          # whose secret it holds (repository variables; leave unset for bring-your-own only)
+          VITE_WITHINGS_BROKER_URL: ${{ vars.WITHINGS_BROKER_URL }}
+          VITE_WITHINGS_CLIENT_ID: ${{ vars.WITHINGS_CLIENT_ID }}
       - if: github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: dist
 
@@ -38,9 +45,13 @@ jobs:
     permissions:
       pages: write
       id-token: write
+    # never cancel a deploy halfway through
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

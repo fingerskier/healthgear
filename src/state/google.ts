@@ -1,7 +1,8 @@
 import { useLiveQuery } from 'dexie-react-hooks'
-import { db, getSetting, markSynced, setSetting, unsynced } from '../db'
+import { clearSyncs, db, getSetting, markSynced, setSetting, unsynced } from '../db'
 import {
   appendToSheet,
+  checkHealthAccount,
   createSheet,
   GoogleApiError,
   googleHealthEligible,
@@ -14,6 +15,7 @@ import {
 import { toast } from './toast'
 
 const KEY = 'google'
+const POINTS_KEY = 'google.sentPoints'
 
 export interface GoogleState {
   clientId?: string
@@ -24,6 +26,7 @@ export interface GoogleState {
 
 // Access tokens are short-lived (1 h) and never persisted.
 let token: GoogleToken | null = null
+let accountChecked = false
 
 const load = () => getSetting<GoogleState>(KEY, {})
 const save = async (patch: Partial<GoogleState>) => setSetting(KEY, { ...(await load()), ...patch })
@@ -34,14 +37,19 @@ export function useGoogle(): GoogleState | undefined {
 
 export const saveGoogleClientId = (clientId: string) => save({ clientId: clientId.trim() })
 
-async function tokenFor(scope: string): Promise<GoogleToken> {
-  if (token && Date.now() < token.expiresAt && token.scopes.has(scope)) return token
-  const { clientId } = await load()
-  if (!clientId) throw new Error('Add your Google OAuth client ID first')
+/**
+ * Call synchronously from the click handler. When a new token is needed the consent popup is
+ * requested before anything is awaited, so it opens inside the click's user activation.
+ */
+function tokenFor(clientId: string, scope: string): Promise<GoogleToken> {
+  if (token && Date.now() < token.expiresAt && token.scopes.has(scope)) return Promise.resolve(token)
   // Ask for both scopes at once so one consent covers both buttons; the user can untick either.
-  token = await requestGoogleToken(clientId, [HEALTH_SCOPE, SHEETS_SCOPE])
-  if (!token.scopes.has(scope)) throw new Error('Permission was not granted for this action')
-  return token
+  return requestGoogleToken(clientId, [HEALTH_SCOPE, SHEETS_SCOPE]).then((t) => {
+    token = t
+    accountChecked = false
+    if (!t.scopes.has(scope)) throw new Error('Permission was not granted for this action')
+    return t
+  })
 }
 
 function explain(e: unknown): string {
@@ -55,41 +63,66 @@ function explain(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-export async function pushGoogleHealth(): Promise<void> {
-  try {
-    const t = await tokenFor(HEALTH_SCOPE)
-    const pending = (await unsynced('googleHealth')).filter(googleHealthEligible)
-    if (pending.length === 0) return toast('Google Health is up to date')
-    const { done, failed } = await pushToGoogleHealth(t, pending)
-    await markSynced('googleHealth', done)
-    await save({ lastHealthPush: Date.now() })
-    toast(failed.length ? `Sent ${done.length}; ${failed.length} failed: ${failed[0].error}` : `Sent ${done.length} readings to Google Health`, failed.length ? 'error' : 'info')
-  } catch (e) {
-    toast(explain(e), 'error')
-  }
+export function pushGoogleHealth(clientId: string): Promise<void> {
+  const tokenPromise = tokenFor(clientId, HEALTH_SCOPE)
+  return (async () => {
+    try {
+      const t = await tokenPromise
+      if (!accountChecked) {
+        await checkHealthAccount(t)
+        accountChecked = true
+      }
+      const pending = (await unsynced('googleHealth')).filter(googleHealthEligible)
+      if (pending.length === 0) return toast('Google Health is up to date')
+      // Points accepted by Google in an interrupted run, so a retry never sends them twice.
+      const points = await getSetting<Record<string, string[]>>(POINTS_KEY, {})
+      const { done, failed } = await pushToGoogleHealth(t, pending, fetch, {
+        sentPoints: (id) => new Set(points[id] ?? []),
+        onPoint: async (id, type) => {
+          points[id] = [...(points[id] ?? []), type]
+          await setSetting(POINTS_KEY, points)
+        },
+        onReading: async (id) => {
+          await markSynced('googleHealth', [id])
+          delete points[id]
+          await setSetting(POINTS_KEY, points)
+        },
+      })
+      await save({ lastHealthPush: Date.now() })
+      toast(failed.length ? `Sent ${done.length}; ${failed.length} failed: ${failed[0].error}` : `Sent ${done.length} readings to Google Health`, failed.length ? 'error' : 'info')
+    } catch (e) {
+      toast(explain(e), 'error')
+    }
+  })()
 }
 
-export async function pushGoogleSheet(): Promise<void> {
-  try {
-    const t = await tokenFor(SHEETS_SCOPE)
-    let { sheetId } = await load()
-    if (!sheetId) {
-      sheetId = await createSheet(t)
-      await save({ sheetId })
-    }
-    const pending = await unsynced('googleSheets')
-    if (pending.length === 0) return toast('Google Sheet is up to date')
+export function pushGoogleSheet(clientId: string): Promise<void> {
+  const tokenPromise = tokenFor(clientId, SHEETS_SCOPE)
+  return (async () => {
     try {
-      await appendToSheet(t, sheetId, pending)
+      const t = await tokenPromise
+      let { sheetId } = await load()
+      if (!sheetId) {
+        sheetId = await createSheet(t)
+        await save({ sheetId })
+      }
+      const pending = await unsynced('googleSheets')
+      if (pending.length === 0) return toast('Google Sheet is up to date')
+      try {
+        await appendToSheet(t, sheetId, pending, fetch, (ids) => markSynced('googleSheets', ids))
+      } catch (e) {
+        if (e instanceof GoogleApiError && e.status === 404) {
+          // The user deleted the sheet: the next push starts a new one with the full history.
+          await save({ sheetId: undefined })
+          await clearSyncs('googleSheets')
+          throw new Error('Your healthgear sheet is gone. Press again to create a new one with everything in it.')
+        }
+        throw e
+      }
+      await save({ lastSheetPush: Date.now() })
+      toast(`Added ${pending.length} rows to your Google Sheet`)
     } catch (e) {
-      // the user deleted the sheet: start a new one next time
-      if (e instanceof GoogleApiError && e.status === 404) await save({ sheetId: undefined })
-      throw e
+      toast(explain(e), 'error')
     }
-    await markSynced('googleSheets', pending.map((r) => r.id))
-    await save({ lastSheetPush: Date.now() })
-    toast(`Added ${pending.length} rows to your Google Sheet`)
-  } catch (e) {
-    toast(explain(e), 'error')
-  }
+  })()
 }

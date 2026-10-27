@@ -2,7 +2,7 @@
 // export (Withings app → Settings → Download my data), which needs no API access or membership.
 
 import { CSV_COLUMNS } from './export'
-import { addReadings } from './db'
+import { addReadings, db } from './db'
 import { KG_PER_LB, type NewReading, type ReadingKind, type SourceKind } from './model'
 
 export function parseCsv(text: string): string[][] {
@@ -53,6 +53,7 @@ function fromHealthgearCsv(rows: string[][]): NewReading[] {
     const source = r[col('source')] as SourceKind
     const notes = r[col('notes')]
     const user = r[col('device_user')]
+    const key = col('dedupe_key') >= 0 ? r[col('dedupe_key')] : ''
     return [
       {
         kind,
@@ -63,6 +64,7 @@ function fromHealthgearCsv(rows: string[][]): NewReading[] {
         device: r[col('device')] || undefined,
         deviceUser: user ? Number(user) : undefined,
         notes: notes ? notes.split('; ') : undefined,
+        dedupeKey: key || undefined,
       },
     ]
   })
@@ -137,8 +139,19 @@ export function parseImport(name: string, text: string): { format: string; readi
   throw new Error(`${name}: unrecognised CSV. Expected a healthgear export or Withings weight.csv / bp.csv`)
 }
 
+/**
+ * The Withings account export has no measurement ids, so its rows can't share keys with readings
+ * already pulled from the Withings API. Treat a Withings reading of the same kind in the same
+ * second as the same measurement.
+ */
+async function dropKnownWithings(readings: NewReading[]): Promise<NewReading[]> {
+  if (!readings.some((r) => r.source === 'withings' && !r.dedupeKey)) return readings
+  const known = new Set((await db.readings.where('source').equals('withings').toArray()).map((r) => `${r.kind}|${Math.floor(r.takenAt / 1000)}`))
+  return readings.filter((r) => r.dedupeKey || r.source !== 'withings' || !known.has(`${r.kind}|${Math.floor(r.takenAt / 1000)}`))
+}
+
 export async function importFile(file: File): Promise<{ format: string; parsed: number; added: number }> {
   const { format, readings } = parseImport(file.name, await file.text())
-  const added = await addReadings(readings)
+  const added = await addReadings(await dropKnownWithings(readings))
   return { format, parsed: readings.length, added: added.length }
 }

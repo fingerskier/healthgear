@@ -1,5 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie'
-import { dedupeKeyFor, cleanValues, type NewReading, type Reading } from './model'
+import { cleanValues, dedupeKeyFor, isComplete, type NewReading, type Reading } from './model'
 
 export type SinkId = 'googleHealth' | 'googleSheets' | 'apple'
 
@@ -25,11 +25,18 @@ export interface Setting {
   value: unknown
 }
 
+/** A reading the user deleted: devices and imports keep re-offering it, so remember to refuse. */
+export interface Tombstone {
+  dedupeKey: string
+  at: number
+}
+
 export class HealthDb extends Dexie {
   readings!: EntityTable<Reading, 'id'>
   syncs!: EntityTable<SyncMark, 'key'>
   devices!: EntityTable<KnownDevice, 'id'>
   settings!: EntityTable<Setting, 'key'>
+  tombstones!: EntityTable<Tombstone, 'dedupeKey'>
 
   constructor(name = 'healthgear') {
     super(name)
@@ -38,44 +45,99 @@ export class HealthDb extends Dexie {
       syncs: 'key, sink, readingId, [sink+readingId]',
       devices: 'id, lastSeen',
       settings: 'key',
+      tombstones: 'dedupeKey',
     })
   }
 }
 
 export const db = new HealthDb()
 
-/**
- * Insert readings, silently skipping ones already stored (same dedupe key).
- * Returns only the readings that were actually new.
- */
-export async function addReadings(input: NewReading[], target: HealthDb = db): Promise<Reading[]> {
+function prepare(input: NewReading[]): Reading[] {
   const now = Date.now()
   const prepared: Reading[] = []
   const seen = new Set<string>()
   for (const r of input) {
     const values = cleanValues(r.kind, r.values)
-    if (Object.keys(values).length === 0) continue
+    if (!isComplete(r.kind, values)) continue
     const dedupeKey = r.dedupeKey ?? dedupeKeyFor({ ...r, values })
     if (seen.has(dedupeKey)) continue
     seen.add(dedupeKey)
     prepared.push({ ...r, values, dedupeKey, id: crypto.randomUUID(), createdAt: now })
   }
-  if (prepared.length === 0) return []
-  return target.transaction('rw', target.readings, async () => {
-    const existingKeys = new Set(
-      await target.readings.where('dedupeKey').anyOf(prepared.map((r) => r.dedupeKey)).keys(),
-    )
-    const fresh = prepared.filter((r) => !existingKeys.has(r.dedupeKey))
-    await target.readings.bulkAdd(fresh)
-    return fresh
+  return prepared
+}
+
+/**
+ * Insert readings, silently skipping ones already stored (same dedupe key) or deleted by the user.
+ * Returns only the readings that were actually new.
+ */
+export async function addReadings(input: NewReading[], target: HealthDb = db): Promise<Reading[]> {
+  return (await upsertReadings(input, target, false)).added
+}
+
+/**
+ * Like addReadings, but a reading whose key exists with different content replaces it (same id)
+ * and loses its sync marks so every sink gets the corrected version. For sources whose records
+ * can change after the fact, e.g. a Withings measurement group the user edits or reassigns.
+ */
+export async function upsertReadings(
+  input: NewReading[],
+  target: HealthDb = db,
+  replaceChanged = true,
+): Promise<{ added: Reading[]; updated: Reading[] }> {
+  const prepared = prepare(input)
+  if (prepared.length === 0) return { added: [], updated: [] }
+  return target.transaction('rw', target.readings, target.syncs, target.tombstones, async () => {
+    const keys = prepared.map((r) => r.dedupeKey)
+    const dead = new Set(await target.tombstones.where('dedupeKey').anyOf(keys).primaryKeys())
+    const existing = new Map((await target.readings.where('dedupeKey').anyOf(keys).toArray()).map((r) => [r.dedupeKey, r]))
+    const added: Reading[] = []
+    const updated: Reading[] = []
+    for (const r of prepared) {
+      if (dead.has(r.dedupeKey)) continue
+      const old = existing.get(r.dedupeKey)
+      if (!old) added.push(r)
+      else if (replaceChanged && contentDiffers(old, r)) updated.push({ ...r, id: old.id, createdAt: old.createdAt })
+    }
+    await target.readings.bulkAdd(added)
+    if (updated.length) {
+      await target.readings.bulkPut(updated)
+      await target.syncs.where('readingId').anyOf(updated.map((r) => r.id)).delete()
+    }
+    return { added, updated }
+  })
+}
+
+function contentDiffers(a: Reading, b: Reading) {
+  return (
+    a.kind !== b.kind ||
+    a.takenAt !== b.takenAt ||
+    JSON.stringify(a.values) !== JSON.stringify(b.values) ||
+    JSON.stringify(a.notes ?? []) !== JSON.stringify(b.notes ?? [])
+  )
+}
+
+/** Delete readings for good: their sync marks go, and their keys are refused from now on. */
+export async function deleteReadings(ids: string[], target: HealthDb = db, remember = true) {
+  await target.transaction('rw', target.readings, target.syncs, target.tombstones, async () => {
+    const rows = (await target.readings.bulkGet(ids)).filter((r): r is Reading => !!r)
+    if (remember) await target.tombstones.bulkPut(rows.map((r) => ({ dedupeKey: r.dedupeKey, at: Date.now() })))
+    await target.readings.bulkDelete(ids)
+    await target.syncs.where('readingId').anyOf(ids).delete()
   })
 }
 
 export async function markSynced(sink: SinkId, readingIds: string[], target: HealthDb = db, remoteIds?: Map<string, string>) {
+  if (readingIds.length === 0) return
   const at = Date.now()
   await target.syncs.bulkPut(
     readingIds.map((readingId) => ({ key: `${sink}:${readingId}`, sink, readingId, at, remoteId: remoteIds?.get(readingId) })),
   )
+}
+
+/** Forget every mark for a sink, e.g. when its destination was deleted and must be refilled. */
+export async function clearSyncs(sink: SinkId, target: HealthDb = db) {
+  await target.syncs.where('sink').equals(sink).delete()
 }
 
 /** Readings never pushed to the given sink, oldest first. Demo data never leaves the browser. */

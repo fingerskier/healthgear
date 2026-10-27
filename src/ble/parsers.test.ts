@@ -50,6 +50,13 @@ describe('Blood Pressure Measurement', () => {
     expect(reading.deviceUser).toBeUndefined()
   })
 
+  it('ignores an implausible device clock (reset to 2000-01-01 or in the future)', () => {
+    const reset = parseBloodPressure(dv(0x02, ...le16(120), ...le16(80), ...le16(93), ...dateTime(1999, 1, 1, 0, 0, 0)), ctx)
+    expect(reset.reading).toMatchObject({ takenAt: NOW, deviceTime: false })
+    const future = parseBloodPressure(dv(0x02, ...le16(120), ...le16(80), ...le16(93), ...dateTime(2031, 1, 1, 0, 0, 0)), ctx)
+    expect(future.reading.deviceTime).toBe(false)
+  })
+
   it('reports pulse-rate range from status bits 3-4', () => {
     const { reading } = parseBloodPressure(dv(0x10, ...le16(120), ...le16(80), ...le16(93), ...le16(0b01_000)), ctx)
     expect(reading.notes).toEqual(['pulse rate above upper limit'])

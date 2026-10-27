@@ -1,6 +1,6 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useState } from 'react'
-import { markSynced, unsynced } from '../db'
+import { db, markSynced, unsynced } from '../db'
 import { DEFAULT_SHORTCUT_NAME, nextBatch } from '../sinks/apple'
 import { useSetting } from '../state/settings'
 import { toast } from '../state/toast'
@@ -9,28 +9,45 @@ import { CheckIcon, UploadIcon } from './icons'
 interface AppleSettings {
   shortcutName: string
   skipWithings: boolean
+  /** batch handed to the shortcut and not yet confirmed; survives tab switches and reloads */
+  pending?: string[]
 }
 
+const DEFAULTS: AppleSettings = { shortcutName: DEFAULT_SHORTCUT_NAME, skipWithings: false }
+
 export function AppleHealth() {
-  const [settings, setSettings] = useSetting<AppleSettings>('apple', { shortcutName: DEFAULT_SHORTCUT_NAME, skipWithings: false })
+  const [settings, setSettings] = useSetting<AppleSettings>('apple', DEFAULTS)
+  const loaded = useLiveQuery(() => db.settings.get('apple').then(() => true), [])
+  if (!loaded) return null
+  // keyed so the name field starts from the stored value once it has loaded
+  return <AppleCard key={settings.shortcutName} settings={settings} setSettings={setSettings} />
+}
+
+function AppleCard({ settings, setSettings }: { settings: AppleSettings; setSettings: (s: AppleSettings) => Promise<void> }) {
   const all = useLiveQuery(() => unsynced('apple'), [])
-  const [sent, setSent] = useState<string[] | null>(null)
+  const [name, setName] = useState(settings.shortcutName)
+  const sent = settings.pending ?? null
   const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
   const pending = (all ?? []).filter((r) => !(settings.skipWithings && r.source === 'withings'))
-  const batch = sent ? null : nextBatch(settings.shortcutName, pending)
+  const batch = sent ? null : nextBatch(name.trim(), pending)
 
-  // Synchronous on purpose: iOS only opens other apps from inside the tap.
+  // Navigation is synchronous on purpose: iOS only opens other apps from inside the tap. The
+  // pending batch is written without waiting; it only has to land before the user comes back.
   const send = () => {
     if (!batch) return toast('Apple Health is up to date')
-    setSent(batch.readings.map((r) => r.id))
+    void setSettings({ ...settings, shortcutName: name.trim(), pending: batch.readings.map((r) => r.id) })
     location.href = batch.url
   }
 
   const confirm = async () => {
     if (!sent) return
     await markSynced('apple', sent)
+    await setSettings({ ...settings, pending: undefined })
     toast(`Marked ${sent.length} readings as sent to Apple Health`)
-    setSent(null)
+  }
+
+  const saveName = () => {
+    if (name.trim() && name.trim() !== settings.shortcutName) void setSettings({ ...settings, shortcutName: name.trim() })
   }
 
   return (
@@ -51,7 +68,7 @@ export function AppleHealth() {
         <summary>Build the shortcut (one time, about 10 minutes)</summary>
         <ol className="prose">
           <li>
-            In Shortcuts tap <strong>+</strong> and name the shortcut <code>{settings.shortcutName}</code> (or change the name below to match yours).
+            In Shortcuts tap <strong>+</strong> and name the shortcut <code>{name}</code> (or change the name below to match yours).
           </li>
           <li>
             Add <em>Get Dictionary from Input</em> (input: <em>Shortcut Input</em>).
@@ -95,7 +112,7 @@ export function AppleHealth() {
       <div className="fields">
         <label>
           <span>Shortcut name</span>
-          <input value={settings.shortcutName} onChange={(e) => void setSettings({ ...settings, shortcutName: e.target.value })} spellCheck={false} />
+          <input value={name} onChange={(e) => setName(e.target.value)} onBlur={saveName} spellCheck={false} />
         </label>
       </div>
       <label className="toggle small">
@@ -103,7 +120,7 @@ export function AppleHealth() {
         Skip readings imported from Withings (if the Withings app already syncs to Health)
       </label>
       <div className="row wrap">
-        <button className="primary" onClick={send} disabled={!batch || !settings.shortcutName.trim()}>
+        <button className="primary" onClick={send} disabled={!batch || !name.trim()}>
           <UploadIcon /> Send {batch?.readings.length ?? 0}
           {pending.length > (batch?.readings.length ?? 0) ? ` of ${pending.length}` : ''} to Apple Health
         </button>
@@ -112,7 +129,7 @@ export function AppleHealth() {
             <button onClick={() => void confirm()}>
               <CheckIcon /> It worked: mark as sent
             </button>
-            <button className="ghost" onClick={() => setSent(null)}>
+            <button className="ghost" onClick={() => void setSettings({ ...settings, pending: undefined })}>
               It failed
             </button>
           </>

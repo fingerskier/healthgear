@@ -1,6 +1,6 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useMemo, useState } from 'react'
-import { db } from '../db'
+import { db, deleteReadings } from '../db'
 import { METRICS, type Metric, type Reading, type ReadingKind } from '../model'
 import { useUnits } from '../state/settings'
 import { display, type UnitPrefs } from '../units'
@@ -227,12 +227,7 @@ function History({ readings, units, syncedBy }: { readings: Reading[]; units: Un
   )
 }
 
-async function deleteReading(id: string) {
-  await db.transaction('rw', db.readings, db.syncs, async () => {
-    await db.readings.delete(id)
-    await db.syncs.where('readingId').equals(id).delete()
-  })
-}
+const deleteReading = (id: string) => deleteReadings([id])
 
 function relative(t: number) {
   const s = (Date.now() - t) / 1000

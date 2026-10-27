@@ -39,6 +39,20 @@ describe('CSV', () => {
   it('round-trips JSON', () => {
     const { readings } = parseImport('x.json', toJson([r({})]))
     expect(readings[0].values.systolic).toBe(120)
+    expect(readings[0].dedupeKey).toBe('k')
+  })
+
+  it('keeps identity and full precision so a restore adds nothing new', () => {
+    const stored = [
+      r({ kind: 'glucose', values: { glucose: 5.55 }, dedupeKey: 'ble|glucose|Meter|7', notes: undefined }),
+      r({ kind: 'body', values: { weight: 72.5747792 }, dedupeKey: 'manual|body|1|...', source: 'manual', notes: undefined }),
+      r({ kind: 'body', values: { weight: 72.345 }, dedupeKey: 'withings|123', source: 'withings', notes: undefined }),
+    ]
+    for (const text of [toCsv(stored), toJson(stored)]) {
+      const back = parseImport('backup', text).readings
+      expect(back.map((x) => x.dedupeKey)).toEqual(stored.map((x) => x.dedupeKey))
+      expect(back.map((x) => x.values)).toEqual(stored.map((x) => x.values))
+    }
   })
 })
 

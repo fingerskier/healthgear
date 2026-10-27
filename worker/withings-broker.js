@@ -9,7 +9,9 @@
 //   npx wrangler deploy worker/withings-broker.js --name healthgear-withings
 //   npx wrangler secret put WITHINGS_CLIENT_SECRET
 //   set vars WITHINGS_CLIENT_ID, ALLOWED_ORIGINS (comma list), ALLOWED_REDIRECTS (comma list)
-// Then paste the worker URL into healthgear → Sync → Withings → "Token broker URL".
+// Then set the healthgear repository variables WITHINGS_BROKER_URL (this worker's URL) and
+// WITHINGS_CLIENT_ID (the same client ID); the next Pages build pins this origin in its CSP and
+// offers one-click "Connect Withings".
 
 const TOKEN_URL = 'https://wbsapi.withings.net/v2/oauth2'
 
@@ -50,13 +52,21 @@ export default {
       return json({ error: 'withings unreachable' }, 502, cors)
     }
     if (upstream.status !== 0) {
-      const misconfigured = /client id|secret/i.test(upstream.error ?? '')
-      return json({ error: upstream.error ?? `withings status ${upstream.status}` }, misconfigured ? 500 : 401, cors)
+      // Only a dead grant is a 401 (the app then drops its tokens and asks the user to reconnect).
+      // Rate limits and timeouts are passed through with Withings' status so the app can retry.
+      const error = upstream.error ?? `withings status ${upstream.status}`
+      const misconfigured = /client id|secret/i.test(error)
+      const deadGrant = !misconfigured && isGrantFailure(upstream.status, error)
+      return json({ error, status: upstream.status }, misconfigured ? 500 : deadGrant ? 401 : 502, cors)
     }
     // Same shape the browser gets from Withings directly, minus the envelope.
     const { access_token, refresh_token, expires_in, userid, scope } = upstream.body
     return json({ access_token, refresh_token, expires_in, userid, scope }, 200, cors)
   },
+}
+
+function isGrantFailure(status, error) {
+  return (status >= 100 && status <= 102) || status === 200 || status === 401 || (status === 503 && /code|refresh|grant|token/i.test(error))
 }
 
 function json(body, status, cors) {

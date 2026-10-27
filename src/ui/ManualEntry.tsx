@@ -7,8 +7,8 @@ import { fromDisplay, unitLabel } from '../units'
 
 const FIELDS: Record<ReadingKind, { metric: Metric; label: string; required?: boolean; step: string }[]> = {
   body: [
-    { metric: 'weight', label: 'Weight', required: true, step: '0.1' },
-    { metric: 'bodyFat', label: 'Body fat', step: '0.1' },
+    { metric: 'weight', label: 'Weight', required: true, step: 'any' },
+    { metric: 'bodyFat', label: 'Body fat', step: 'any' },
   ],
   bloodPressure: [
     { metric: 'systolic', label: 'Systolic', required: true, step: '1' },
@@ -20,8 +20,8 @@ const FIELDS: Record<ReadingKind, { metric: Metric; label: string; required?: bo
     { metric: 'spo2', label: 'SpO₂', required: true, step: '1' },
     { metric: 'heartRate', label: 'Pulse', step: '1' },
   ],
-  temperature: [{ metric: 'temperature', label: 'Temperature', required: true, step: '0.1' }],
-  glucose: [{ metric: 'glucose', label: 'Glucose', required: true, step: '0.1' }],
+  temperature: [{ metric: 'temperature', label: 'Temperature', required: true, step: 'any' }],
+  glucose: [{ metric: 'glucose', label: 'Glucose', required: true, step: 'any' }],
 }
 
 const KINDS: { kind: ReadingKind; label: string }[] = [
