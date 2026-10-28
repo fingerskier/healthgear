@@ -2,11 +2,13 @@ import Dexie, { type EntityTable } from 'dexie'
 import { cleanValues, dedupeKeyFor, isComplete, type NewReading, type Reading } from './model'
 
 export type SinkId = 'googleHealth' | 'googleSheets' | 'apple'
+/** partial progress inside one reading (e.g. its weight point accepted, body fat not yet) */
+type PartialSink = 'googleHealthPoint'
 
 export interface SyncMark {
-  /** `${sink}:${readingId}` */
+  /** `${sink}:${readingId}`, or `${sink}:${readingId}:${part}` for partial progress */
   key: string
-  sink: SinkId
+  sink: SinkId | PartialSink
   readingId: string
   at: number
   remoteId?: string
@@ -133,6 +135,26 @@ export async function markSynced(sink: SinkId, readingIds: string[], target: Hea
   await target.syncs.bulkPut(
     readingIds.map((readingId) => ({ key: `${sink}:${readingId}`, sink, readingId, at, remoteId: remoteIds?.get(readingId) })),
   )
+}
+
+/**
+ * Partial progress lives with the sync marks, so anything that invalidates a reading's marks (a
+ * correction, a delete) invalidates its partial progress too.
+ */
+export async function markPartSynced(readingId: string, part: string, target: HealthDb = db) {
+  const sink: PartialSink = 'googleHealthPoint'
+  await target.syncs.put({ key: `${sink}:${readingId}:${part}`, sink, readingId, at: Date.now(), remoteId: part })
+}
+
+export async function partsSynced(readingIds: string[], target: HealthDb = db): Promise<Map<string, Set<string>>> {
+  const out = new Map<string, Set<string>>()
+  const marks = await target.syncs.where('sink').equals('googleHealthPoint').toArray()
+  const wanted = new Set(readingIds)
+  for (const m of marks) {
+    if (!wanted.has(m.readingId) || !m.remoteId) continue
+    out.set(m.readingId, (out.get(m.readingId) ?? new Set()).add(m.remoteId))
+  }
+  return out
 }
 
 /** Forget every mark for a sink, e.g. when its destination was deleted and must be refilled. */

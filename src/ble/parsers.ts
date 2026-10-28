@@ -88,7 +88,8 @@ export interface Parsed {
   transient?: boolean
 }
 
-type Ctx = { device?: string; now?: number }
+/** device: display name; deviceId: stable per-origin Bluetooth id (names collide across units) */
+type Ctx = { device?: string; deviceId?: string; now?: number }
 
 const Y2000 = Date.UTC(2000, 0, 1)
 
@@ -307,7 +308,7 @@ export function parseGlucose(data: DataView, ctx: Ctx = {}): GlucoseRecord | nul
       source: 'ble',
       device: ctx.device,
       // glucose meters number their records; that's a better identity than the timestamp
-      dedupeKey: ctx.device ? `ble|glucose|${ctx.device}|${sequence}` : undefined,
+      dedupeKey: ctx.deviceId || ctx.device ? `ble|glucose|${ctx.deviceId ?? ctx.device}|${sequence}` : undefined,
     },
   }
 }

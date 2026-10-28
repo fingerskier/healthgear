@@ -172,6 +172,13 @@ describe('Glucose Measurement', () => {
     expect(rec.reading.dedupeKey).toBe('ble|glucose|test|7')
   })
 
+  it('keys records by the stable device id, not the shared model name', () => {
+    const bytes = dv(0x02, ...le16(7), ...dateTime(2026, 5, 6, 7, 0, 0), ...le16(0xb064), 0x11)
+    const a = parseGlucose(bytes, { ...ctx, device: 'Contour', deviceId: 'idA' })!
+    const b = parseGlucose(bytes, { ...ctx, device: 'Contour', deviceId: 'idB' })!
+    expect(a.reading.dedupeKey).not.toBe(b.reading.dedupeKey)
+  })
+
   it('converts mol/L', () => {
     // 5.5 mmol/L = 0.0055 mol/L => mantissa 55, exp -4 => 0xC037
     const rec = parseGlucose(dv(0x06, ...le16(1), ...dateTime(2026, 5, 6, 7, 0, 0), ...le16(0xc037), 0x11), ctx)!

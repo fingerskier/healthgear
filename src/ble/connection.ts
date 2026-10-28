@@ -235,7 +235,7 @@ export class DeviceSession {
       const data = ch.value
       if (!data) return
       try {
-        this.assembler.push(spec.parse(data, { device: this.device.name ?? undefined }), spec.continued?.(data) ?? false)
+        this.assembler.push(spec.parse(data, { device: this.device.name ?? undefined, deviceId: this.device.id }), spec.continued?.(data) ?? false)
       } catch (e) {
         console.warn('unparseable notification', spec.uuid, e)
       }

@@ -1,5 +1,5 @@
 import { useLiveQuery } from 'dexie-react-hooks'
-import { clearSyncs, db, getSetting, markSynced, setSetting, unsynced } from '../db'
+import { clearSyncs, db, getSetting, markPartSynced, markSynced, partsSynced, setSetting, unsynced } from '../db'
 import {
   appendToSheet,
   checkHealthAccount,
@@ -15,7 +15,6 @@ import {
 import { toast } from './toast'
 
 const KEY = 'google'
-const POINTS_KEY = 'google.sentPoints'
 
 export interface GoogleState {
   clientId?: string
@@ -52,6 +51,27 @@ function tokenFor(clientId: string, scope: string): Promise<GoogleToken> {
   })
 }
 
+const inFlight = new Set<string>()
+
+/**
+ * One push per destination at a time, across tabs too: two concurrent runs would both read the
+ * same unsynced readings before either records progress, and send everything twice (or create
+ * two sheets). A second press while one is running is told so instead of queueing.
+ */
+async function exclusive(name: string, run: () => Promise<void>): Promise<void> {
+  if (inFlight.has(name)) return toast('Already sending, one moment')
+  inFlight.add(name)
+  try {
+    if (!navigator.locks) return await run()
+    await navigator.locks.request(`healthgear-${name}`, { ifAvailable: true }, async (lock) => {
+      if (!lock) toast('Already sending from another tab')
+      else await run()
+    })
+  } finally {
+    inFlight.delete(name)
+  }
+}
+
 function explain(e: unknown): string {
   if (e instanceof GoogleApiError) {
     if (e.status === 401) {
@@ -64,8 +84,9 @@ function explain(e: unknown): string {
 }
 
 export function pushGoogleHealth(clientId: string): Promise<void> {
+  if (inFlight.has('google-health')) return Promise.resolve(toast('Already sending, one moment'))
   const tokenPromise = tokenFor(clientId, HEALTH_SCOPE)
-  return (async () => {
+  return exclusive('google-health', async () => {
     try {
       const t = await tokenPromise
       if (!accountChecked) {
@@ -74,31 +95,25 @@ export function pushGoogleHealth(clientId: string): Promise<void> {
       }
       const pending = (await unsynced('googleHealth')).filter(googleHealthEligible)
       if (pending.length === 0) return toast('Google Health is up to date')
-      // Points accepted by Google in an interrupted run, so a retry never sends them twice.
-      const points = await getSetting<Record<string, string[]>>(POINTS_KEY, {})
+      // Points Google accepted in an interrupted run, so a retry never sends them twice.
+      const points = await partsSynced(pending.map((r) => r.id))
       const { done, failed } = await pushToGoogleHealth(t, pending, fetch, {
-        sentPoints: (id) => new Set(points[id] ?? []),
-        onPoint: async (id, type) => {
-          points[id] = [...(points[id] ?? []), type]
-          await setSetting(POINTS_KEY, points)
-        },
-        onReading: async (id) => {
-          await markSynced('googleHealth', [id])
-          delete points[id]
-          await setSetting(POINTS_KEY, points)
-        },
+        sentPoints: (id) => points.get(id) ?? new Set(),
+        onPoint: (id, type) => markPartSynced(id, type),
+        onReading: (id) => markSynced('googleHealth', [id]),
       })
       await save({ lastHealthPush: Date.now() })
       toast(failed.length ? `Sent ${done.length}; ${failed.length} failed: ${failed[0].error}` : `Sent ${done.length} readings to Google Health`, failed.length ? 'error' : 'info')
     } catch (e) {
       toast(explain(e), 'error')
     }
-  })()
+  })
 }
 
 export function pushGoogleSheet(clientId: string): Promise<void> {
+  if (inFlight.has('google-sheet')) return Promise.resolve(toast('Already sending, one moment'))
   const tokenPromise = tokenFor(clientId, SHEETS_SCOPE)
-  return (async () => {
+  return exclusive('google-sheet', async () => {
     try {
       const t = await tokenPromise
       let { sheetId } = await load()
@@ -124,5 +139,5 @@ export function pushGoogleSheet(clientId: string): Promise<void> {
     } catch (e) {
       toast(explain(e), 'error')
     }
-  })()
+  })
 }

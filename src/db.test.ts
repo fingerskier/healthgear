@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { addReadings, deleteReadings, HealthDb, markSynced, unsynced, upsertReadings } from './db'
+import { addReadings, deleteReadings, HealthDb, markPartSynced, markSynced, partsSynced, unsynced, upsertReadings } from './db'
 import type { NewReading } from './model'
 
 let db: HealthDb
@@ -93,5 +93,15 @@ describe('deletion and corrections', () => {
     expect((await unsynced('googleHealth', db)).map((r) => r.id)).toEqual([orig.id])
     // unchanged re-sync is a no-op
     expect((await upsertReadings([w(71.5)], db)).updated).toHaveLength(0)
+  })
+
+  it('a correction also discards partial progress, so the corrected value is sent in full', async () => {
+    const w = (kg: number): NewReading => ({ kind: 'body', takenAt: 1000, deviceTime: true, values: { weight: kg, bodyFat: 20 }, source: 'withings', dedupeKey: 'withings|8' })
+    const [orig] = await addReadings([w(82.1)], db)
+    await markPartSynced(orig.id, 'weight', db) // weight accepted, body fat failed
+    expect((await partsSynced([orig.id], db)).get(orig.id)).toEqual(new Set(['weight']))
+    await upsertReadings([w(71.5)], db)
+    expect((await partsSynced([orig.id], db)).get(orig.id)).toBeUndefined()
+    expect((await unsynced('googleHealth', db)).map((r) => r.id)).toEqual([orig.id])
   })
 })

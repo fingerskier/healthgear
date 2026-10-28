@@ -132,6 +132,13 @@ function Google() {
 function GoogleCard({ g }: { g: GoogleState }) {
   const [clientId, setClientId] = useState(g.clientId ?? '')
   const [ready, setReady] = useState(gisReady)
+  const [busy, setBusy] = useState<'health' | 'sheet' | null>(null)
+  const run = (which: 'health' | 'sheet', push: (id: string) => Promise<void>) => {
+    // push() must start inside the click (consent popup); only the bookkeeping waits
+    const done = push(g.clientId!)
+    setBusy(which)
+    void done.finally(() => setBusy(null))
+  }
   const counts = useLiveQuery(async () => ({
     health: (await unsynced('googleHealth')).filter(googleHealthEligible).length,
     sheets: (await unsynced('googleSheets')).length,
@@ -191,10 +198,10 @@ function GoogleCard({ g }: { g: GoogleState }) {
             Save client ID
           </button>
         )}
-        <button className="primary" disabled={!g.clientId || !ready} onClick={() => void pushGoogleHealth(g.clientId!)}>
+        <button className="primary" disabled={!g.clientId || !ready || busy !== null} onClick={() => run('health', pushGoogleHealth)}>
           <UploadIcon /> Send to Google Health ({counts?.health ?? 0})
         </button>
-        <button disabled={!g.clientId || !ready} onClick={() => void pushGoogleSheet(g.clientId!)}>
+        <button disabled={!g.clientId || !ready || busy !== null} onClick={() => run('sheet', pushGoogleSheet)}>
           <UploadIcon /> Add to Google Sheet ({counts?.sheets ?? 0})
         </button>
       </div>

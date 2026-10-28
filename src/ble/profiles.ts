@@ -49,7 +49,7 @@ export const CHAR = {
   modelNumber: uuid16(0x2a24),
 } as const
 
-export type ParseFn = (data: DataView, ctx: { device?: string; now?: number }) => Parsed | null
+export type ParseFn = (data: DataView, ctx: { device?: string; deviceId?: string; now?: number }) => Parsed | null
 
 export interface CharacteristicSpec {
   uuid: string
